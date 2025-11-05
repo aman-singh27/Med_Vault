@@ -21,15 +21,13 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { useToast } from "@/components/ui/use-toast";
-import axios from "axios";
 import {
   InputOTP,
   InputOTPGroup,
   InputOTPSlot,
 } from "@/components/ui/input-otp";
-
-// API Base URL - Update this to match your backend
-const API_BASE_URL = "http://localhost:8080";
+import { auth } from "@/lib/firebase";
+import { signInWithEmailAndPassword } from "firebase/auth" ;
 
 // Login schema
 const loginSchema = z.object({
@@ -90,99 +88,59 @@ const LoginPage = () => {
 
   async function handleLogin(values: LoginFormValues) {
     try {
-      const response = await axios.post(`${API_BASE_URL}/api/v1/auth/login`, {
-        email: values.email,
-        password: values.password,
-        deviceId: getOrCreateDeviceId(),
-        deviceFingerprint: generateDeviceFingerprint(),
-      });
-
-      const data = response.data;
-
-      if (data.requiresMfa) {
-        // MFA is required - show MFA form
-        setMfaRequired(true);
-        setTempToken(data.accessToken);
-        setUserEmail(values.email);
-        toast({
-          title: "MFA Required",
-          description:
-            "Please enter the 6-digit code sent to your registered method.",
-        });
-      } else {
-        // No MFA - login successful
-        localStorage.setItem("accessToken", data.accessToken);
-        localStorage.setItem("refreshToken", data.refreshToken);
-        localStorage.setItem("userRole", data.role);
-        localStorage.setItem("userId", data.userId);
-
-        toast({
-          title: "Signed in successfully",
-          description: `Welcome back, ${values.email}`,
-        });
-
-        // Navigate based on role
-        if (data.role === "PATIENT") {
-          navigate("/patient/dashboard");
-        } else if (data.role === "DOCTOR") {
-          navigate("/doctor/dashboard");
-        } else if (data.role === "ADMIN") {
-          navigate("/admin/dashboard");
-        } else {
-          navigate("/");
-        }
-      }
-    } catch (error: any) {
+      const userCredential = await signInWithEmailAndPassword(
+        auth,
+        values.email,
+        values.password
+      );
+      
+      const user = userCredential.user;
+      
       toast({
-        title: "Login failed",
-        description:
-          error.response?.data?.message || "Invalid email or password",
+        title: "Login Successful",
+        description: `Welcome back, ${user.email}!`,
+      });
+      
+      // Store user info in localStorage
+      localStorage.setItem("userId", user.uid);
+      localStorage.setItem("userEmail", user.email || "");
+      
+      // Navigate to patient dashboard (you can customize based on user role)
+      navigate("/patient/dashboard");
+    } catch (error: any) {
+      console.error("Login error:", error);
+      
+      let errorMessage = "Failed to sign in. Please check your credentials.";
+      
+      if (error.code === "auth/user-not-found") {
+        errorMessage = "No account found with this email.";
+      } else if (error.code === "auth/wrong-password") {
+        errorMessage = "Incorrect password.";
+      } else if (error.code === "auth/invalid-email") {
+        errorMessage = "Invalid email address.";
+      } else if (error.code === "auth/user-disabled") {
+        errorMessage = "This account has been disabled.";
+      } else if (error.code === "auth/too-many-requests") {
+        errorMessage = "Too many failed attempts. Please try again later.";
+      }
+      
+      toast({
+        title: "Login Failed",
+        description: errorMessage,
         variant: "destructive",
       });
     }
   }
 
   async function handleMFAVerification(values: MFAFormValues) {
-    try {
-      const response = await axios.post(
-        `${API_BASE_URL}/api/v1/auth/verify-mfa`,
-        {
-          email: userEmail,
-          mfaCode: values.mfaCode,
-          tempToken: tempToken,
-        }
-      );
-
-      const data = response.data;
-
-      // Store tokens
-      localStorage.setItem("accessToken", data.accessToken);
-      localStorage.setItem("refreshToken", data.refreshToken);
-      localStorage.setItem("userRole", data.role);
-      localStorage.setItem("userId", data.userId);
-
-      toast({
-        title: "MFA Verified",
-        description: "Authentication successful",
-      });
-
-      // Navigate based on role
-      if (data.role === "PATIENT") {
-        navigate("/patient/dashboard");
-      } else if (data.role === "DOCTOR") {
-        navigate("/doctor/dashboard");
-      } else if (data.role === "ADMIN") {
-        navigate("/admin/dashboard");
-      } else {
-        navigate("/");
-      }
-    } catch (error: any) {
-      toast({
-        title: "MFA Verification failed",
-        description: error.response?.data?.message || "Invalid MFA code",
-        variant: "destructive",
-      });
-    }
+    // TODO: Implement Firebase MFA verification if needed
+    toast({
+      title: "Not Implemented",
+      description: "Please implement Firebase MFA",
+      variant: "destructive",
+    });
+    
+    console.log("MFA verification attempt:", values.mfaCode);
   }
 
   return (

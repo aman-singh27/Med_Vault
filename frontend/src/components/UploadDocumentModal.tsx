@@ -13,11 +13,88 @@ import { Label } from "./ui/label";
 import { useToast } from "./ui/use-toast";
 import { Upload, FileText, X, Loader2 } from "lucide-react";
 import { createClient } from "@supabase/supabase-js";
-import apiClient from "../services/api";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import * as pdfjsLib from "pdfjs-dist";
+// TODO: Configure Firestore for document storage
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || "";
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
 const supabase = supabaseUrl && supabaseAnonKey ? createClient(supabaseUrl, supabaseAnonKey) : null;
+const geminiApiKey = "AIzaSyDXTo7etaPJaHflv_TBmEMSnts31oCQAvU";
+
+// Configure PDF.js worker lazily
+let workerConfigured = false;
+function configurePdfWorker() {
+  if (!workerConfigured) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.296/pdf.worker.min.js`;
+    workerConfigured = true;
+  }
+}
+
+async function extractTextFromPdf(file: File): Promise<string> {
+  configurePdfWorker();
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  let fullText = "";
+
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const textContent = await page.getTextContent();
+    const pageText = textContent.items.map((item: any) => item.str).join(" ");
+    fullText += `\n\n=== Page ${pageNum} ===\n${pageText}`;
+  }
+
+  return fullText.trim();
+}
+
+
+async function runGeminiAnalysis(text: string, customPrompt?: string): Promise<string> {
+  if (!geminiApiKey) {
+    throw new Error("Gemini API key missing. Add VITE_GEMINI_API_KEY to your .env file.");
+  }
+  const genAI = new GoogleGenerativeAI(geminiApiKey);
+  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+  const prompt =
+    customPrompt?.trim() ||
+    `You must output ONLY valid JSON — no markdown, no text before or after.
+
+Analyze the given medical report text and extract structured information as follows:
+- Identify all test parameters with their values, units, and reference ranges.
+- Normalize parameter names (e.g., "Hb" -> "Hemoglobin").
+- Compare each value with its reference range.
+- Include ONLY those parameters that are marked as "HIGH" or "LOW" (ignore "NORMAL" ones).
+
+Also extract:
+- Report title (e.g., "Kidney Function Test Report")
+- Doctor name (if available)
+- Report date (if available)
+
+Finally, write a short layman-friendly summary (2–3 sentences) explaining the abnormalities and what they could suggest — use gentle, understandable, and empathetic language. Avoid medical jargon.
+
+Output must be in this exact JSON format:
+
+{
+  "report_title": "string",
+  "doctor_name": "string",
+  "report_date": "string",
+  "tests": [
+    {
+      "parameter": "string",
+      "value": "string",
+      "unit": "string",
+      "reference_range": "string",
+      "status": "LOW | HIGH"
+    }
+  ],
+  "summary": "string"
+}
+`;
+  const result = await model.generateContent([
+    { text: prompt },
+    { text: "\n\nDocument Text:\n" + text.substring(0, 200000) },
+  ]);
+  return result.response.text();
+}
 
 interface UploadDocumentModalProps {
   open: boolean;
@@ -45,6 +122,11 @@ export default function UploadDocumentModal({
   const [documentTitle, setDocumentTitle] = useState("");
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiOutput, setAiOutput] = useState<string | null>(null);
+  const [extractLoading, setExtractLoading] = useState(false);
+  const [extractedText, setExtractedText] = useState<string | null>(null);
+  const [modelsLoading, setModelsLoading] = useState(false);
   const { toast } = useToast();
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -81,8 +163,117 @@ export default function UploadDocumentModal({
     }
   };
 
+  const handleListModels = async () => {
+    try {
+      setModelsLoading(true);
+      setAiOutput(null);
+      if (!geminiApiKey) {
+        throw new Error("Gemini API key missing. Add VITE_GEMINI_API_KEY to your .env file.");
+      }
+      const genAI = new GoogleGenerativeAI(geminiApiKey);
+      let data: any;
+      // Use SDK if available
+      // @ts-ignore - listModels may not exist in some builds
+      if (typeof genAI.listModels === "function") {
+        // @ts-ignore
+        data = await genAI.listModels();
+      } else {
+        const resp = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models?key=${geminiApiKey}`
+        );
+        data = await resp.json();
+      }
+      console.log("Gemini models:", data);
+      setAiOutput(JSON.stringify(data, null, 2));
+    } catch (err: any) {
+      toast({
+        title: "Failed to list models",
+        description: err?.message || "Could not retrieve models",
+        variant: "destructive",
+      });
+    } finally {
+      setModelsLoading(false);
+    }
+  };
+
   const handleRemoveFile = () => {
     setSelectedFile(null);
+    setAiOutput(null);
+    setExtractedText(null);
+  };
+
+  const handleExtract = async () => {
+    if (!selectedFile) {
+      toast({
+        title: "No file selected",
+        description: "Please select a PDF to extract text",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (selectedFile.type !== "application/pdf") {
+      toast({
+        title: "Unsupported file",
+        description: "Text extraction is available for PDF files only",
+        variant: "destructive",
+      });
+      return;
+    }
+    try {
+      setExtractLoading(true);
+      setExtractedText(null);
+      setUploadProgress("Extracting text from PDF...");
+      const text = await extractTextFromPdf(selectedFile);
+      setExtractedText(text || "");
+      setUploadProgress("");
+    } catch (err: any) {
+      setUploadProgress("");
+      toast({
+        title: "Extraction failed",
+        description: err?.message || "Could not extract text",
+        variant: "destructive",
+      });
+    } finally {
+      setExtractLoading(false);
+    }
+  };
+
+  const handleAnalyze = async () => {
+    if (!selectedFile) {
+      toast({
+        title: "No file selected",
+        description: "Please select a PDF to analyze",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (selectedFile.type !== "application/pdf") {
+      toast({
+        title: "Unsupported file",
+        description: "Gemini analysis is available for PDF files only",
+        variant: "destructive",
+      });
+      return;
+    }
+    try {
+      setAiLoading(true);
+      setAiOutput(null);
+      setUploadProgress("Extracting text from PDF...");
+      const extractedText = await extractTextFromPdf(selectedFile);
+      setUploadProgress("Analyzing with Gemini...");
+      const analysis = await runGeminiAnalysis(extractedText);
+      setAiOutput(analysis);
+      setUploadProgress("");
+    } catch (err: any) {
+      setUploadProgress("");
+      toast({
+        title: "Analysis failed",
+        description: err?.message || "Could not analyze document",
+        variant: "destructive",
+      });
+    } finally {
+      setAiLoading(false);
+    }
   };
 
   const handleUpload = async () => {
@@ -105,6 +296,24 @@ export default function UploadDocumentModal({
       
       if (!supabase) {
         throw new Error("Supabase is not configured. Please add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to your .env file");
+      }
+
+      // Step 0: If PDF, extract text and run Gemini analysis first
+      let extractedText: string | undefined;
+      let aiAnalysis: string | undefined;
+      if (selectedFile.type === "application/pdf") {
+        setUploadProgress("Extracting text from PDF...");
+        extractedText = await extractTextFromPdf(selectedFile);
+        console.log('Extracted text length:', extractedText.length);
+
+        setUploadProgress("Analyzing with Gemini...");
+        try {
+          aiAnalysis = await runGeminiAnalysis(extractedText);
+          console.log('Gemini analysis completed');
+        } catch (aiErr: any) {
+          console.error('Gemini analysis failed:', aiErr);
+          // Continue upload even if AI analysis fails
+        }
       }
 
       // Step 1: Upload to Supabase Storage
@@ -136,26 +345,33 @@ export default function UploadDocumentModal({
 
       console.log('Public URL generated:', urlData.publicUrl);
 
-      // Step 3: Send to Spring Boot API
-      setUploadProgress("Processing document with AI...");
-      const payload = {
+      // Step 3: Save to Firestore
+      setUploadProgress("Saving document metadata...");
+      // TODO: Implement Firestore document creation
+      // Example:
+      // import { collection, addDoc } from 'firebase/firestore';
+      // await addDoc(collection(db, 'documents'), {
+      //   title: documentTitle,
+      //   fileUrl: urlData.publicUrl,
+      //   fileName: fileName,
+      //   extractedText,
+      //   aiAnalysis,
+      //   userId: auth.currentUser?.uid,
+      //   createdAt: new Date()
+      // });
+      
+      console.log('Document data prepared:', {
         title: documentTitle,
         fileUrl: urlData.publicUrl,
         fileName: fileName,
-      };
-      console.log('Sending to backend API:', payload);
-      
-      const response = await apiClient.post<ProcessedDocument>(
-        "/api/v1/documents/upload",
-        payload
-      );
-      
-      console.log('Backend response:', response.data);
+        hasExtractedText: !!extractedText,
+        hasAiAnalysis: !!aiAnalysis
+      });
 
       toast({
         title: "Upload successful!",
         description:
-          "Your document is being processed. You'll see it in your documents list shortly.",
+          "Document uploaded to Supabase. Implement Firestore to save metadata.",
       });
 
       // Reset form
@@ -189,7 +405,7 @@ export default function UploadDocumentModal({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[525px]">
+      <DialogContent className="sm:max-w-[1024px]">
         <DialogHeader>
           <DialogTitle>Upload Medical Document</DialogTitle>
           <DialogDescription>
@@ -272,6 +488,19 @@ export default function UploadDocumentModal({
           )}
         </div>
 
+        {extractedText && (
+          <div className="max-h-64 overflow-auto rounded-md border p-3 text-sm bg-muted/40">
+            <p className="font-medium mb-2">Extracted Text</p>
+            <pre className="whitespace-pre-wrap break-words">{extractedText}</pre>
+          </div>
+        )}
+
+        {aiOutput && (
+          <div className="max-h-64 overflow-auto rounded-md border p-3 text-sm bg-muted/40">
+            <pre className="whitespace-pre-wrap break-words">{aiOutput}</pre>
+          </div>
+        )}
+
         <DialogFooter>
           <Button
             variant="outline"
@@ -279,6 +508,51 @@ export default function UploadDocumentModal({
             disabled={uploading}
           >
             Cancel
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={handleExtract}
+            disabled={uploading || extractLoading || !selectedFile}
+            className="bg-gray-600 hover:bg-gray-500 text-white"
+          >
+            {extractLoading ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                Extract Text
+              </>
+            ) : (
+              "Extract Text"
+            )}
+          </Button>
+          {/* <Button
+            variant="secondary"
+            onClick={handleListModels}
+            disabled={uploading || modelsLoading}
+            className="bg-purple-600 hover:bg-purple-500 text-white"
+          >
+            {modelsLoading ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                List Models
+              </>
+            ) : (
+              "List Models"
+            )}
+          </Button> */}
+          <Button
+            variant="secondary"
+            onClick={handleAnalyze}
+            disabled={uploading || aiLoading || !selectedFile}
+            className="bg-blue-600 hover:bg-blue-500 text-white"
+          >
+            {aiLoading ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                Analyze with Gemini
+              </>
+            ) : (
+              "Analyze with Gemini"
+            )}
           </Button>
           <Button
             onClick={handleUpload}

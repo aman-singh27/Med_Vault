@@ -2,8 +2,9 @@ import { useState, useEffect } from "react";
 import { Plus, Loader2 } from "lucide-react";
 import { Button } from "../../components/ui/button";
 import UploadDocumentModal from "../../components/UploadDocumentModal";
-import apiClient from "../../services/api";
 import { useToast } from "../../components/ui/use-toast";
+
+// TODO: Configure Firestore for document retrieval
 
 interface Document {
   id: string;
@@ -27,34 +28,26 @@ export default function Documents() {
     setLoading(true);
     try {
       console.log('=== Fetching Documents ===');
-      console.log('Access Token:', localStorage.getItem('accessToken'));
-      console.log('User ID:', localStorage.getItem('userId'));
+      // TODO: Implement Firestore document fetching
+      // Example:
+      // import { collection, query, where, getDocs } from 'firebase/firestore';
+      // const q = query(collection(db, 'documents'), where('userId', '==', auth.currentUser?.uid));
+      // const querySnapshot = await getDocs(q);
+      // const docs = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      // setDocuments(docs);
       
-      const response = await apiClient.get<Document[]>("/api/v1/documents");
-      console.log('Documents fetched successfully:', response.data);
-      
-      const data = response.data;
-      if (Array.isArray(data)) {
-        setDocuments(data);
-      } else {
-        console.warn("API returned non-array data:", data);
-        setDocuments([]);
-      }
+      // For now, set empty array
+      setDocuments([]);
+      console.log('Firestore integration pending');
     } catch (error: any) {
       console.error("=== Failed to fetch documents ===");
-      console.error("Error object:", error);
-      console.error("Error response:", error.response?.data);
-      console.error("Error status:", error.response?.status);
-      console.error("Error message:", error.message);
+      console.error("Error:", error);
       
-      // Set empty array on error so component doesn't crash
       setDocuments([]);
-      // Only show toast if it's available
       if (toast) {
         toast({
           title: "Error",
-          description:
-            "Failed to load documents. Make sure the backend is running on port 8080.",
+          description: "Failed to load documents. Please implement Firestore integration.",
           variant: "destructive",
         });
       }

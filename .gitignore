@@ -8,4 +8,5 @@
 /backend/.idea/
 /backend/target/
 /frontend/.env
+/frontend/.env.local
 /frontend/pnpm-lock.yaml

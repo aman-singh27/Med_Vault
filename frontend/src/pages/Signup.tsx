@@ -32,7 +32,9 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { useToast } from "@/components/ui/use-toast";
-import apiClient from "@/services/api";
+import { auth, db } from "@/lib/firebase";
+import { createUserWithEmailAndPassword } from "firebase/auth";
+import { doc, setDoc } from "firebase/firestore";
 
 // Step 1: Account creation schema
 const step1Schema = z
@@ -179,28 +181,81 @@ export default function Signup() {
     if (!step1Data || !step2Data) return;
 
     try {
-      const response = await apiClient.post(
-        "/api/v1/auth/register/patient",
-        {
-          // Step 1 data
-          email: step1Data.email,
-          password: step1Data.password,
-          confirmPassword: step1Data.confirmPassword,
-          // Step 3 data
-          ...values,
-        }
+      // Create Firebase user
+      const userCredential = await createUserWithEmailAndPassword(
+        auth,
+        step1Data.email,
+        step1Data.password
       );
-
-      toast({
-        title: "Account created",
-        description: response.data.message || "Welcome to MedVault!",
+      
+      const user = userCredential.user;
+      
+      // Store patient data in Firestore
+      await setDoc(doc(db, "patients", user.uid), {
+        email: step1Data.email,
+        role: step2Data.role,
+        firstName: values.firstName,
+        lastName: values.lastName,
+        phoneNumber: values.phoneNumber,
+        dateOfBirth: values.dateOfBirth,
+        gender: values.gender,
+        aadhaarNumber: values.aadhaarNumber,
+        bloodGroup: values.bloodGroup,
+        allergies: values.allergies || "",
+        chronicConditions: values.chronicConditions || "",
+        address: values.address,
+        emergencyContactName: values.emergencyContactName,
+        emergencyContactPhone: values.emergencyContactPhone,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       });
-
+      
+      toast({
+        title: "Account Created Successfully!",
+        description: "Welcome to MedVault. Please sign in to continue.",
+      });
+      
       navigate("/login");
     } catch (error: any) {
+      console.error("Patient registration error:", error);
+      
+      let errorMessage = "Failed to create account. Please try again.";
+      let errorTitle = "Registration Failed";
+      
+      if (error.code === "auth/email-already-in-use") {
+        errorTitle = "Email Already Registered";
+        errorMessage = "An account with this email already exists. Please sign in or use a different email.";
+        
+        // Show toast with action to go to login
+        toast({
+          title: errorTitle,
+          description: errorMessage,
+          variant: "destructive",
+          action: (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => navigate("/login")}
+            >
+              Go to Login
+            </Button>
+          ),
+        });
+        
+        // Reset to step 1 so user can change email
+        setStep(1);
+        return;
+      } else if (error.code === "auth/weak-password") {
+        errorMessage = "Password is too weak. Please use a stronger password.";
+      } else if (error.code === "auth/invalid-email") {
+        errorMessage = "Invalid email address.";
+      } else if (error.code === "auth/network-request-failed") {
+        errorMessage = "Network error. Please check your internet connection.";
+      }
+      
       toast({
-        title: "Registration failed",
-        description: error.response?.data?.message || "Something went wrong",
+        title: errorTitle,
+        description: errorMessage,
         variant: "destructive",
       });
     }
@@ -210,35 +265,78 @@ export default function Signup() {
     if (!step1Data || !step2Data) return;
 
     try {
-      const response = await apiClient.post(
-        "/api/v1/auth/register/doctor",
-        {
-          // Step 1 data
-          email: step1Data.email,
-          password: step1Data.password,
-          confirmPassword: step1Data.confirmPassword,
-          // Step 3 data
-          firstName: values.firstName,
-          lastName: values.lastName,
-          phoneNumber: values.phoneNumber,
-          specialization: values.specialization,
-          licenseNumber: values.licenseNumber,
-          hospitalAffiliation: values.hospitalAffiliation,
-          yearsOfExperience: parseInt(values.yearsOfExperience),
-          address: values.address,
-        }
+      // Create Firebase user
+      const userCredential = await createUserWithEmailAndPassword(
+        auth,
+        step1Data.email,
+        step1Data.password
       );
-
-      toast({
-        title: "Account created",
-        description: response.data.message || "Welcome to MedVault, Doctor!",
+      
+      const user = userCredential.user;
+      
+      // Store healthcare provider data in Firestore
+      await setDoc(doc(db, "healthcare_providers", user.uid), {
+        email: step1Data.email,
+        role: step2Data.role,
+        firstName: values.firstName,
+        lastName: values.lastName,
+        phoneNumber: values.phoneNumber,
+        specialization: values.specialization,
+        licenseNumber: values.licenseNumber,
+        hospitalAffiliation: values.hospitalAffiliation || "",
+        yearsOfExperience: values.yearsOfExperience,
+        address: values.address,
+        verified: false, // Requires admin verification
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       });
-
+      
+      toast({
+        title: "Account Created Successfully!",
+        description: "Your account is pending verification. You'll be notified once approved.",
+      });
+      
       navigate("/login");
     } catch (error: any) {
+      console.error("Provider registration error:", error);
+      
+      let errorMessage = "Failed to create account. Please try again.";
+      let errorTitle = "Registration Failed";
+      
+      if (error.code === "auth/email-already-in-use") {
+        errorTitle = "Email Already Registered";
+        errorMessage = "An account with this email already exists. Please sign in or use a different email.";
+        
+        // Show toast with action to go to login
+        toast({
+          title: errorTitle,
+          description: errorMessage,
+          variant: "destructive",
+          action: (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => navigate("/login")}
+            >
+              Go to Login
+            </Button>
+          ),
+        });
+        
+        // Reset to step 1 so user can change email
+        setStep(1);
+        return;
+      } else if (error.code === "auth/weak-password") {
+        errorMessage = "Password is too weak. Please use a stronger password.";
+      } else if (error.code === "auth/invalid-email") {
+        errorMessage = "Invalid email address.";
+      } else if (error.code === "auth/network-request-failed") {
+        errorMessage = "Network error. Please check your internet connection.";
+      }
+      
       toast({
-        title: "Registration failed",
-        description: error.response?.data?.message || "Something went wrong",
+        title: errorTitle,
+        description: errorMessage,
         variant: "destructive",
       });
     }
