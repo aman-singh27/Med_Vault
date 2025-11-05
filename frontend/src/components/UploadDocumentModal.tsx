@@ -15,21 +15,28 @@ import { Upload, FileText, X, Loader2 } from "lucide-react";
 import { createClient } from "@supabase/supabase-js";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import * as pdfjsLib from "pdfjs-dist";
-// TODO: Configure Firestore for document storage
+import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import { collection, addDoc, serverTimestamp } from "firebase/firestore";
+import { db } from "@/lib/firebase"; // Import from your existing firebase.ts
 
+// Supabase Configuration
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || "";
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
 const supabase = supabaseUrl && supabaseAnonKey ? createClient(supabaseUrl, supabaseAnonKey) : null;
-const geminiApiKey = "AIzaSyDXTo7etaPJaHflv_TBmEMSnts31oCQAvU";
 
-// Configure PDF.js worker lazily
+// Gemini Configuration
+const geminiApiKey = import.meta.env.VITE_GEMINI_API_KEY || "";
+
+// ✅ Configure PDF.js worker correctly (no CDN, version-safe)
 let workerConfigured = false;
 function configurePdfWorker() {
   if (!workerConfigured) {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.296/pdf.worker.min.js`;
+    pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
     workerConfigured = true;
   }
 }
+
+
 
 async function extractTextFromPdf(file: File): Promise<string> {
   configurePdfWorker();
@@ -47,13 +54,12 @@ async function extractTextFromPdf(file: File): Promise<string> {
   return fullText.trim();
 }
 
-
 async function runGeminiAnalysis(text: string, customPrompt?: string): Promise<string> {
   if (!geminiApiKey) {
     throw new Error("Gemini API key missing. Add VITE_GEMINI_API_KEY to your .env file.");
   }
   const genAI = new GoogleGenerativeAI(geminiApiKey);
-  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
   const prompt =
     customPrompt?.trim() ||
     `You must output ONLY valid JSON — no markdown, no text before or after.
@@ -87,11 +93,11 @@ Output must be in this exact JSON format:
     }
   ],
   "summary": "string"
-}
-`;
+}`;
+
   const result = await model.generateContent([
     { text: prompt },
-    { text: "\n\nDocument Text:\n" + text.substring(0, 200000) },
+    { text: "\n\nDocument Text:\n" + text.substring(0, 60000) },
   ]);
   return result.response.text();
 }
@@ -102,15 +108,18 @@ interface UploadDocumentModalProps {
   onDocumentAdded?: () => void;
 }
 
-interface ProcessedDocument {
-  id: string;
-  title: string;
-  fileUrl: string;
-  category: string;
-  documentType: string;
-  summary: string;
-  anomalies: string[];
-  processingStatus: string;
+interface GeminiAnalysis {
+  report_title?: string;
+  doctor_name?: string;
+  report_date?: string;
+  tests?: Array<{
+    parameter: string;
+    value: string;
+    unit: string;
+    reference_range: string;
+    status: "LOW" | "HIGH";
+  }>;
+  summary?: string;
 }
 
 export default function UploadDocumentModal({
@@ -126,7 +135,6 @@ export default function UploadDocumentModal({
   const [aiOutput, setAiOutput] = useState<string | null>(null);
   const [extractLoading, setExtractLoading] = useState(false);
   const [extractedText, setExtractedText] = useState<string | null>(null);
-  const [modelsLoading, setModelsLoading] = useState(false);
   const { toast } = useToast();
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -163,39 +171,6 @@ export default function UploadDocumentModal({
     }
   };
 
-  const handleListModels = async () => {
-    try {
-      setModelsLoading(true);
-      setAiOutput(null);
-      if (!geminiApiKey) {
-        throw new Error("Gemini API key missing. Add VITE_GEMINI_API_KEY to your .env file.");
-      }
-      const genAI = new GoogleGenerativeAI(geminiApiKey);
-      let data: any;
-      // Use SDK if available
-      // @ts-ignore - listModels may not exist in some builds
-      if (typeof genAI.listModels === "function") {
-        // @ts-ignore
-        data = await genAI.listModels();
-      } else {
-        const resp = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models?key=${geminiApiKey}`
-        );
-        data = await resp.json();
-      }
-      console.log("Gemini models:", data);
-      setAiOutput(JSON.stringify(data, null, 2));
-    } catch (err: any) {
-      toast({
-        title: "Failed to list models",
-        description: err?.message || "Could not retrieve models",
-        variant: "destructive",
-      });
-    } finally {
-      setModelsLoading(false);
-    }
-  };
-
   const handleRemoveFile = () => {
     setSelectedFile(null);
     setAiOutput(null);
@@ -226,6 +201,10 @@ export default function UploadDocumentModal({
       const text = await extractTextFromPdf(selectedFile);
       setExtractedText(text || "");
       setUploadProgress("");
+      toast({
+        title: "Extraction successful",
+        description: "Text extracted from PDF successfully",
+      });
     } catch (err: any) {
       setUploadProgress("");
       toast({
@@ -264,6 +243,10 @@ export default function UploadDocumentModal({
       const analysis = await runGeminiAnalysis(extractedText);
       setAiOutput(analysis);
       setUploadProgress("");
+      toast({
+        title: "Analysis complete",
+        description: "Document analyzed successfully with Gemini AI",
+      });
     } catch (err: any) {
       setUploadProgress("");
       toast({
@@ -289,30 +272,54 @@ export default function UploadDocumentModal({
     setUploading(true);
 
     try {
-      console.log('=== Document Upload Debug ===');
-      console.log('Access Token:', localStorage.getItem('accessToken'));
-      console.log('User ID:', localStorage.getItem('userId'));
-      console.log('User Role:', localStorage.getItem('userRole'));
-      
+      console.log("=== Document Upload Debug ===");
+      console.log("Access Token:", localStorage.getItem("accessToken"));
+      console.log("User ID:", localStorage.getItem("userId"));
+      console.log("User Role:", localStorage.getItem("userRole"));
+
       if (!supabase) {
-        throw new Error("Supabase is not configured. Please add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to your .env file");
+        throw new Error(
+          "Supabase is not configured. Please add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to your .env file"
+        );
       }
 
       // Step 0: If PDF, extract text and run Gemini analysis first
       let extractedText: string | undefined;
-      let aiAnalysis: string | undefined;
+      let parsedAnalysis: GeminiAnalysis | null = null;
+
       if (selectedFile.type === "application/pdf") {
         setUploadProgress("Extracting text from PDF...");
         extractedText = await extractTextFromPdf(selectedFile);
-        console.log('Extracted text length:', extractedText.length);
+        console.log("Extracted text length:", extractedText.length);
 
-        setUploadProgress("Analyzing with Gemini...");
+        setUploadProgress("Analyzing with Gemini AI...");
         try {
-          aiAnalysis = await runGeminiAnalysis(extractedText);
-          console.log('Gemini analysis completed');
+          const aiAnalysis = await runGeminiAnalysis(extractedText);
+          console.log("Gemini analysis completed");
+
+          // Parse the JSON response safely
+          try {
+            // Remove markdown code blocks if present
+            let cleanedJson = aiAnalysis.trim();
+            if (cleanedJson.startsWith("```json")) {
+              cleanedJson = cleanedJson.replace(/```json\n?/g, "").replace(/```\n?$/g, "");
+            } else if (cleanedJson.startsWith("```")) {
+              cleanedJson = cleanedJson.replace(/```\n?/g, "");
+            }
+            
+            parsedAnalysis = JSON.parse(cleanedJson);
+            console.log("Parsed Gemini analysis:", parsedAnalysis);
+          } catch (parseErr) {
+            console.warn("Invalid JSON from Gemini, storing raw text instead:", parseErr);
+            parsedAnalysis = { summary: aiAnalysis } as GeminiAnalysis;
+          }
         } catch (aiErr: any) {
-          console.error('Gemini analysis failed:', aiErr);
-          // Continue upload even if AI analysis fails
+          console.error("Gemini analysis failed:", aiErr);
+          toast({
+            title: "AI Analysis warning",
+            description: "AI analysis failed, but upload will continue.",
+            variant: "default",
+          });
         }
       }
 
@@ -326,7 +333,11 @@ export default function UploadDocumentModal({
         "_"
       )}.${fileExt}`;
 
-      console.log('Uploading to Supabase:', { fileName, fileSize: selectedFile.size, fileType: selectedFile.type });
+      console.log("Uploading to Supabase:", {
+        fileName,
+        fileSize: selectedFile.size,
+        fileType: selectedFile.type,
+      });
 
       const { data: uploadData, error: uploadError } = await supabase.storage
         .from("medical-documents")
@@ -336,47 +347,105 @@ export default function UploadDocumentModal({
         });
 
       if (uploadError) throw uploadError;
-      console.log('Supabase upload successful:', uploadData);
+      console.log("Supabase upload successful:", uploadData);
 
       // Step 2: Get public URL
       const { data: urlData } = supabase.storage
         .from("medical-documents")
         .getPublicUrl(fileName);
 
-      console.log('Public URL generated:', urlData.publicUrl);
+      console.log("Public URL generated:", urlData.publicUrl);
 
-      // Step 3: Save to Firestore
-      setUploadProgress("Saving document metadata...");
-      // TODO: Implement Firestore document creation
-      // Example:
-      // import { collection, addDoc } from 'firebase/firestore';
-      // await addDoc(collection(db, 'documents'), {
-      //   title: documentTitle,
-      //   fileUrl: urlData.publicUrl,
-      //   fileName: fileName,
-      //   extractedText,
-      //   aiAnalysis,
-      //   userId: auth.currentUser?.uid,
-      //   createdAt: new Date()
-      // });
-      
-      console.log('Document data prepared:', {
+      // Step 3: Save to Firestore with properly structured data
+      setUploadProgress("Saving document metadata to Firestore...");
+
+      const documentData: any = {
         title: documentTitle,
         fileUrl: urlData.publicUrl,
         fileName: fileName,
-        hasExtractedText: !!extractedText,
-        hasAiAnalysis: !!aiAnalysis
-      });
+        fileType: selectedFile.type,
+        fileSize: selectedFile.size,
+        userId: userId,
+        uploadedAt: serverTimestamp(),
+        createdAt: new Date().toISOString(),
+      };
 
-      toast({
-        title: "Upload successful!",
-        description:
-          "Document uploaded to Supabase. Implement Firestore to save metadata.",
-      });
+      // Add extracted text if available
+      if (extractedText) {
+        documentData.extractedText = extractedText;
+      }
+
+      // Add AI analysis results if available
+      if (parsedAnalysis) {
+        documentData.aiAnalysis = {
+          reportTitle: parsedAnalysis.report_title || documentTitle,
+          doctorName: parsedAnalysis.doctor_name || "Not specified",
+          reportDate: parsedAnalysis.report_date || "Not specified",
+          tests: parsedAnalysis.tests || [],
+          summary: parsedAnalysis.summary || "No summary available",
+          processedAt: new Date().toISOString(),
+        };
+
+        // Extract anomalies (HIGH/LOW values) for quick access
+        if (parsedAnalysis.tests && parsedAnalysis.tests.length > 0) {
+          documentData.anomalies = parsedAnalysis.tests.map(
+            (test) => `${test.parameter}: ${test.value} ${test.unit} (${test.status})`
+          );
+          documentData.hasAnomalies = true;
+          documentData.anomalyCount = parsedAnalysis.tests.length;
+        } else {
+          documentData.anomalies = [];
+          documentData.hasAnomalies = false;
+          documentData.anomalyCount = 0;
+        }
+
+        // Add document category based on report title
+        const reportTitle = parsedAnalysis.report_title?.toLowerCase() || "";
+        if (reportTitle.includes("blood")) {
+          documentData.category = "Blood Test";
+        } else if (reportTitle.includes("kidney")) {
+          documentData.category = "Kidney Function";
+        } else if (reportTitle.includes("liver")) {
+          documentData.category = "Liver Function";
+        } else if (reportTitle.includes("thyroid")) {
+          documentData.category = "Thyroid";
+        } else if (reportTitle.includes("prescription")) {
+          documentData.category = "Prescription";
+        } else {
+          documentData.category = "General Medical Report";
+        }
+
+        documentData.processingStatus = "completed";
+      } else {
+        documentData.processingStatus = "uploaded_without_analysis";
+        documentData.category = "Uncategorized";
+      }
+
+      try {
+        const docRef = await addDoc(collection(db, "documents"), documentData);
+        console.log("Document saved in Firestore with ID:", docRef.id);
+
+        toast({
+          title: "Upload successful! 🎉",
+          description: parsedAnalysis
+            ? `Document analyzed and stored. Found ${documentData.anomalyCount} anomalies.`
+            : "Document uploaded successfully.",
+        });
+      } catch (firestoreErr: any) {
+        console.error("Firestore error:", firestoreErr);
+        toast({
+          title: "Firestore save failed",
+          description: firestoreErr.message || "Could not save to Firestore",
+          variant: "destructive",
+        });
+        throw firestoreErr;
+      }
 
       // Reset form
       setSelectedFile(null);
       setDocumentTitle("");
+      setAiOutput(null);
+      setExtractedText(null);
       setUploadProgress("");
       onOpenChange(false);
 
@@ -385,16 +454,11 @@ export default function UploadDocumentModal({
     } catch (error: any) {
       console.error("=== Upload Error ===");
       console.error("Error object:", error);
-      console.error("Error response:", error.response?.data);
-      console.error("Error status:", error.response?.status);
       console.error("Error message:", error.message);
-      
+
       toast({
         title: "Upload failed",
-        description:
-          error.response?.data?.message ||
-          error.message ||
-          "Failed to upload document",
+        description: error.message || "Failed to upload document",
         variant: "destructive",
       });
     } finally {
@@ -480,6 +544,7 @@ export default function UploadDocumentModal({
             />
           </div>
 
+          {/* Upload Progress */}
           {uploading && uploadProgress && (
             <div className="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg">
               <Loader2 className="w-5 h-5 animate-spin text-blue-500" />
@@ -488,16 +553,24 @@ export default function UploadDocumentModal({
           )}
         </div>
 
+        {/* Extracted Text Preview */}
         {extractedText && (
           <div className="max-h-64 overflow-auto rounded-md border p-3 text-sm bg-muted/40">
-            <p className="font-medium mb-2">Extracted Text</p>
-            <pre className="whitespace-pre-wrap break-words">{extractedText}</pre>
+            <p className="font-medium mb-2">Extracted Text Preview</p>
+            <pre className="whitespace-pre-wrap break-words text-xs">
+              {extractedText.substring(0, 1000)}
+              {extractedText.length > 1000 && "..."}
+            </pre>
           </div>
         )}
 
+        {/* AI Analysis Preview */}
         {aiOutput && (
           <div className="max-h-64 overflow-auto rounded-md border p-3 text-sm bg-muted/40">
-            <pre className="whitespace-pre-wrap break-words">{aiOutput}</pre>
+            <p className="font-medium mb-2">AI Analysis Preview</p>
+            <pre className="whitespace-pre-wrap break-words text-xs">
+              {aiOutput}
+            </pre>
           </div>
         )}
 
@@ -518,27 +591,12 @@ export default function UploadDocumentModal({
             {extractLoading ? (
               <>
                 <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                Extract Text
+                Extracting...
               </>
             ) : (
               "Extract Text"
             )}
           </Button>
-          {/* <Button
-            variant="secondary"
-            onClick={handleListModels}
-            disabled={uploading || modelsLoading}
-            className="bg-purple-600 hover:bg-purple-500 text-white"
-          >
-            {modelsLoading ? (
-              <>
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                List Models
-              </>
-            ) : (
-              "List Models"
-            )}
-          </Button> */}
           <Button
             variant="secondary"
             onClick={handleAnalyze}
@@ -548,10 +606,10 @@ export default function UploadDocumentModal({
             {aiLoading ? (
               <>
                 <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                Analyze with Gemini
+                Analyzing...
               </>
             ) : (
-              "Analyze with Gemini"
+              "Analyze with AI"
             )}
           </Button>
           <Button
