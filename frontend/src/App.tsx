@@ -11,7 +11,7 @@ import DoctorDashboard from "./pages/doctor-dashboard";
 import PatientDashboard from "./pages/patient-dashboard";
 
 const queryClient = new QueryClient();
-
+// /vskhaikdbja/
 const App = () => (
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>

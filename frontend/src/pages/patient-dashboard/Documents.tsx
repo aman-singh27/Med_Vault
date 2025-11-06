@@ -18,12 +18,14 @@ interface Document {
   createdAt: string;
 }
 
+// TODO: Configure Firestore for document retrieval
+//bsuoadsaoidnasdobasodina
 export default function Documents() {
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
   const { toast } = useToast();
-
+// ubyun
   const fetchDocuments = async () => {
     setLoading(true);
     try {
